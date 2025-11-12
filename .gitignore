@@ -1,0 +1,32 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# OS-specific stuff
+.DS_Store
+Thumbs.db
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Local data and output
+visited.json
+*.html
+*.txt
+
+# IDE settings
+.vscode/
+.idea/
