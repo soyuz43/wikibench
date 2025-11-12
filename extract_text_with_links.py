@@ -7,7 +7,7 @@ import requests
 from bs4 import BeautifulSoup, Comment
 
 API_URL = "https://en.wikipedia.org/w/api.php"
-UA = "WikiBenchBot/0.1 (https://github.com/soyuz43; contact: kebekad673@proton.me)"
+UA = "WikiBenchBot/0.1 (https://github.com/soyuz43/wikibench; contact: kebekad673@proton.me)"
 
 # Headings whose entire sections should be removed (case-insensitive, trimmed)
 STRIP_SECTIONS = {
