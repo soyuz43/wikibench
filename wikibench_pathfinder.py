@@ -22,6 +22,14 @@ API = "https://en.wikipedia.org/w/api.php"
 CACHE_DIR = "./cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# Define pages to exclude from the search
+EXCLUDE_TITLES = {
+    "Doi (identifier)",  # Add other titles you want to exclude here
+    "ISBN (identifier)",  # "Another Page Title",
+    "Internet Archive",  # "Yet Another Title",
+    "ISSN (identifier)"
+}
+
 HEADERS = {
     "User-Agent": "WikiBenchBot/0.2 (https://github.com/soyuz43; contact: kebekad673@proton.me)"
 }
@@ -54,34 +62,37 @@ async def fetch_links(session, title):
     """Fetch all linked article titles from a Wikipedia page, with caching and continuation."""
     cached = load_cached_links(title)
     if cached:
-        return cached
+        # Apply exclusion filter to cached results as well
+        return [link for link in cached if link not in EXCLUDE_TITLES]
 
     params = {
         "action": "query",
         "titles": title,
         "prop": "links",
+        "plnamespace": 0,   # only main articles, not categories/templates
         "pllimit": "max",
         "format": "json",
         "redirects": 1
     }
-    links = []
+    all_links = []  # Aggregate links from all batches here
     while True:
         async with session.get(API, params=params) as resp:
             if resp.status != 200:
                 print(f"[WARN] Failed to fetch {title} ({resp.status})")
-                break
+                break # Return what we have so far, or handle error differently
             data = await resp.json()
             pages = data.get("query", {}).get("pages", {})
             for p in pages.values():
                 if "links" in p:
-                    links.extend(l["title"] for l in p["links"])
+                    # Extend the main list with links from this batch, excluding unwanted ones
+                    all_links.extend(l["title"] for l in p["links"] if l["title"] not in EXCLUDE_TITLES)
             if "continue" in data:
                 params.update(data["continue"])
             else:
                 break
         await asyncio.sleep(0.1)  # be polite
-    save_cached_links(title, links)
-    return links
+    save_cached_links(title, all_links) # Save the filtered, complete list
+    return all_links
 
 # ------------------------------------------------------
 # Bidirectional BFS
