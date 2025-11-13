@@ -26,7 +26,7 @@ dist/
 # Local data and output
 visited.json
 *.html
-*.txt
+
 
 # IDE settings
 .vscode/
