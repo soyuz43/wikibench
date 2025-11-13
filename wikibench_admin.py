@@ -59,33 +59,50 @@ def debug(msg: str):
 def clean_cache(confirm: bool = True):
     """
     Remove all cached JSON files in the cache directory.
+    Optionally delete visualization outputs (cache/viz subdirectory).
     """
     if not os.path.exists(CACHE_DIR):
         warn(f"Cache directory does not exist at {CACHE_DIR}")
         return
 
     files = [f for f in os.listdir(CACHE_DIR) if os.path.isfile(os.path.join(CACHE_DIR, f))]
-    if not files:
-        info("Cache is already empty.")
+    viz_dir = os.path.join(CACHE_DIR, "viz")
+
+    if not files and not os.path.exists(viz_dir):
+        info("Cache is already empty (no cached files or visualizations).")
         return
 
-    info(f"Found {len(files)} file(s) in cache directory.")
+    if files:
+        info(f"Found {len(files)} file(s) in cache directory.")
+        if confirm:
+            response = input(f"[!]  This will delete {len(files)} cached file(s). Proceed? [y/N]: ").strip().lower()
+            if response != "y":
+                info("Cleanup aborted by user.")
+                return
 
-    if confirm:
-        response = input(f"[!]  This will delete {len(files)} cached file(s). Proceed? [y/N]: ").strip().lower()
-        if response != "y":
-            info("Cleanup aborted by user.")
-            return
+        for filename in files:
+            path = os.path.join(CACHE_DIR, filename)
+            try:
+                os.remove(path)
+                debug(f"Deleted {filename}")
+            except Exception as e:
+                error(f"Failed to remove {filename}: {e}")
 
-    for filename in files:
-        path = os.path.join(CACHE_DIR, filename)
-        try:
-            os.remove(path)
-            debug(f"Deleted {filename}")
-        except Exception as e:
-            error(f"Failed to remove {filename}: {e}")
+        success(f"Cleared {len(files)} cached file(s).")
 
-    success(f"Cleared {len(files)} cached file(s).")
+    # --- New visualization cleanup section ---
+    if os.path.exists(viz_dir):
+        response = input("Delete visualizations as well? [y/N]: ").strip().lower()
+        if response == "y":
+            try:
+                shutil.rmtree(viz_dir)
+                success("Deleted visualization subdirectory (cache/viz).")
+            except Exception as e:
+                error(f"Failed to delete visualization directory: {e}")
+        else:
+            info("Kept visualization subdirectory.")
+    else:
+        debug("No visualization subdirectory found.")
 
 # ---------------------------------------------------------------------------
 # Environment inspection
