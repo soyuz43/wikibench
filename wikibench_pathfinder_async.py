@@ -21,6 +21,10 @@ import urllib.parse
 import networkx as nx
 import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if present
+load_dotenv()
 
 CACHE_DIR = "./cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -172,15 +176,13 @@ class RateLimiter:
 rate_limiter = RateLimiter(MAX_RPS)
 
 
-# Stop scanning after these H2 sections
-STOP_SECTIONS = {"See also", "References", "External links", "Further reading", "Notes"}
-
 def _is_stop_h2(tag) -> bool:
     """Return True if this <h2> is a terminal section like 'See also', 'References', etc."""
     if not tag or getattr(tag, "name", None) != "h2":
         return False
     htxt = tag.get_text(separator=" ", strip=True)
     return any(s in htxt for s in STOP_SECTIONS)
+
 
 async def fetch_visible_links(session: aiohttp.ClientSession, title: str):
     """Fetch visible article links from Wikipedia, robust to HTML structure changes."""
@@ -257,7 +259,7 @@ async def fetch_visible_links(session: aiohttp.ClientSession, title: str):
     # Optional debug (set WIKIBENCH_DEBUG=1)
     if os.getenv("WIKIBENCH_DEBUG") == "1":
         print(f"[DEBUG] Extracted {len(links_sorted)} links from {title}: "
-            f"{'Adolf_Hitler IN RESULT' if 'Adolf_Hitler' in links_sorted else 'Adolf_Hitler NOT FOUND'}")
+              f"{'Adolf_Hitler IN RESULT' if 'Adolf_Hitler' in links_sorted else 'Adolf_Hitler NOT FOUND'}")
 
     return links_sorted
 
@@ -277,14 +279,28 @@ async def verify_path(session: aiohttp.ClientSession, path: list[str]) -> bool:
 # ------------------------------------------------------
 
 async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
-    """Perform bidirectional BFS with visible link fetching and hop verification."""
+    """
+    Perform bidirectional BFS with visible link fetching and hop verification.
+    Returns: (path, meeting_node, parent_start, parent_target)
+      - path: list[str] | None
+      - meeting_node: str | None
+      - parent_start: dict[child->parent] from the forward search
+      - parent_target: dict[child->parent] from the backward search
+    """
     if start == target:
-        return [start]
+        return [start], start, {}, {}
 
+    # frontier maps: node -> path so far (kept for intersection checks)
     front_start = {start: [start]}
     front_target = {target: [target]}
     visited_start = {start}
     visited_target = {target}
+
+    # parent maps for visualization
+    parent_start: dict[str, str] = {}
+    parent_target: dict[str, str] = {}
+
+    meeting_node = None
 
     G = nx.Graph()
     G.add_nodes_from([start, target])
@@ -302,7 +318,7 @@ async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
             depth += 1
             print(f"[INFO] Depth {depth} | frontier sizes: {len(front_start)} & {len(front_target)}")
 
-            # Expand from start
+            # -------- Expand from start side
             new_front = {}
             tasks = [asyncio.create_task(fetch_visible_links(session, n)) for n in front_start]
             results = await asyncio.gather(*tasks)
@@ -311,11 +327,14 @@ async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
                 for link in links:
                     if link not in visited_start:
                         visited_start.add(link)
+                        parent_start[link] = node
                         new_path = front_start[node] + [link]
                         new_front[link] = new_path
                         G.add_edge(node, link)
 
                         if link in front_target:
+                            # found meeting
+                            meeting_node = link
                             path1 = new_path
                             path2 = front_target[link]
                             full = path1 + path2[::-1][1:]
@@ -325,7 +344,7 @@ async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
                                     visualize_graph(G, link, target, pos)
                                     plt.ioff()
                                     plt.show()
-                                return full
+                                return full, meeting_node, parent_start, parent_target
                             else:
                                 print("[INFO] Discarded false path after verification; continuing.")
                                 if visualize:
@@ -334,7 +353,7 @@ async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
 
             front_start = new_front
 
-            # Expand from target
+            # -------- Expand from target side
             new_front = {}
             tasks = [asyncio.create_task(fetch_visible_links(session, n)) for n in front_target]
             results = await asyncio.gather(*tasks)
@@ -343,11 +362,14 @@ async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
                 for link in links:
                     if link not in visited_target:
                         visited_target.add(link)
+                        parent_target[link] = node
                         new_path = front_target[node] + [link]
                         new_front[link] = new_path
                         G.add_edge(node, link)
 
                         if link in front_start:
+                            # found meeting
+                            meeting_node = link
                             path1 = front_start[link]
                             path2 = new_path
                             full = path1 + path2[::-1][1:]
@@ -357,7 +379,7 @@ async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
                                     visualize_graph(G, link, target, pos)
                                     plt.ioff()
                                     plt.show()
-                                return full
+                                return full, meeting_node, parent_start, parent_target
                             else:
                                 print("[INFO] Discarded false path after verification; continuing.")
                                 if visualize:
@@ -373,7 +395,7 @@ async def bidirectional_bfs(start, target, visualize=False, max_depth=6):
     if visualize:
         plt.ioff()
         plt.show()
-    return None
+    return None, None, parent_start, parent_target
 
 
 # ------------------------------------------------------
@@ -391,6 +413,59 @@ def visualize_graph(G, current_node, target, pos):
     nx.draw(G, pos, with_labels=False, node_color=node_colors, node_size=80, alpha=0.8)
     plt.title(f"Exploring: {current_node if current_node else '...'}")
     plt.pause(0.001)
+
+
+def visualize_search_path(forward_parents, backward_parents, meeting_node, start, goal, cache_dir):
+    """
+    Generate a simple text visualization of how the bidirectional search met.
+    Writes a formatted tree-style view of the forward and backward exploration
+    to a subdirectory within the cache directory (cache/viz/).
+    """
+    def build_path(parents, node):
+        path = [node]
+        while node in parents:
+            node = parents[node]
+            path.append(node)
+        path.reverse()
+        return path
+
+    # forward: start -> ... -> meeting
+    forward_path = build_path(forward_parents, meeting_node)
+    # backward: target -> ... -> meeting
+    backward_path = build_path(backward_parents, meeting_node)
+
+    forward_depth = len(forward_path) - 1
+    backward_depth = len(backward_path) - 1
+
+    lines = []
+    lines.append(f"Forward search (depth 0–{forward_depth}):")
+    for i, node in enumerate(forward_path):
+        indent = "     " * i
+        lines.append(f"{indent}{node}")
+        if i < len(forward_path) - 1:
+            lines.append(f"{indent} └─> {forward_path[i+1]}")
+
+    lines.append("")
+    lines.append(f"Backward search (depth 0–{backward_depth}):")
+    for i, node in enumerate(backward_path):
+        indent = "     " * i
+        lines.append(f"{indent}{node}")
+        if i < len(backward_path) - 1:
+            lines.append(f"{indent} └─> {backward_path[i+1]}")
+
+    viz_text = "\n".join(lines)
+    print(viz_text)
+
+    # create subdirectory inside cache for visualizations
+    viz_dir = os.path.join(cache_dir, "viz")
+    os.makedirs(viz_dir, exist_ok=True)
+
+    out_path = os.path.join(viz_dir, f"search_viz_{start}_to_{goal}.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(viz_text)
+
+    print(f"[INFO] Saved search visualization to {out_path}")
+
 
 
 # ------------------------------------------------------
@@ -412,7 +487,9 @@ if __name__ == "__main__":
     print(f"[INFO] Searching path from '{start}' to '{target}' (max depth {max_depth})")
     print(f"[INFO] Viz={'ON' if visualize else 'OFF'} | MAX_RPS={MAX_RPS} | CONC={MAX_CONCURRENCY}")
     start_time = time.time()
-    path = asyncio.run(bidirectional_bfs(start, target, visualize=visualize, max_depth=max_depth))
+    path, meeting_node, parent_start, parent_target = asyncio.run(
+        bidirectional_bfs(start, target, visualize=visualize, max_depth=max_depth)
+    )
     elapsed = time.time() - start_time
 
     if path:
@@ -420,5 +497,9 @@ if __name__ == "__main__":
         for step in path:
             print(f" → {step}")
         print(json.dumps(path, indent=2))
+
+        # print + persist forward/backward frontier summary
+        if meeting_node is not None:
+            visualize_search_path(parent_start, parent_target, meeting_node, start, target, CACHE_DIR)
     else:
         print(f"[FAILURE] No path found within depth {max_depth} ({elapsed:.2f}s)")
