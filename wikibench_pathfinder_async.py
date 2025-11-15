@@ -258,8 +258,10 @@ async def fetch_visible_links(session: aiohttp.ClientSession, title: str):
 
     # Optional debug (set WIKIBENCH_DEBUG=1)
     if os.getenv("WIKIBENCH_DEBUG") == "1":
-        print(f"[DEBUG] Extracted {len(links_sorted)} links from {title}: "
-              f"{'Adolf_Hitler IN RESULT' if 'Adolf_Hitler' in links_sorted else 'Adolf_Hitler NOT FOUND'}")
+        found = target in links_sorted
+        status = f"{target} IN RESULT" if found else f"{target} NOT FOUND"
+        print(f"[DEBUG] Extracted {len(links_sorted)} links from {title}: {status}")
+
 
     return links_sorted
 
