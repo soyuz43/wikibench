@@ -7,46 +7,41 @@ Each run compares the model's navigation choices against the ground-truth
 shortest path (optional) and records a detailed trace.
 
 Usage:
-  # Pick a model interactively from Ollama's installed models
   ./wikibench_ollama_harness.py \
-    --pick-model \
+    --model llama3.1:latest \
     --start "UPS Airlines Flight 2976" \
     --target "Adolf Hitler" \
     --compare
 
-  # Or specify a model explicitly
-  ./wikibench_ollama_harness.py \
-    --model llama3:8b \
-    --start "UPS Airlines Flight 2976" \
-    --target "Adolf Hitler"
-
 Notes:
-- The harness loads environment variables from a .env file if present.
-- The default prompt template is resolved relative to this script at:
-    prompts/prompt.yml
-  You can override with --prompt or the env var WIKIBENCH_PROMPT_PATH.
-- Ollama endpoint selection is handled by $OLLAMA_HOST; the harness
-  uses that for /api/tags and passes it through to the `ollama` CLI.
+- Loads environment variables from a .env file if present.
+- Default prompt template path resolves to: prompts/prompt.yml
+  (override with --prompt or $WIKIBENCH_PROMPT_PATH).
+- Ollama endpoint is handled by the `ollama` CLI; $OLLAMA_HOST is passed through.
+- Includes an optional interactive model picker (--pick-model).
 """
 
 import os
 import re
-import sys
 import json
 import time
 import argparse
 import subprocess
 import asyncio
-import urllib.request
-import urllib.error
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 import yaml
 from dotenv import load_dotenv
 
 # Local imports
 from wikibench_pathfinder_async import bidirectional_bfs
+# We call the extractor as a subprocess to avoid import/CLI mismatch.
+# (We still import the symbol name so users see the dependency,
+#  but we will not call it directly.)
+from extract_text_with_links import main as _extract_links_marker  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Init
@@ -59,162 +54,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Logging
 # ---------------------------------------------------------------------------
 
-def info(msg: str):   print(f"[INFO] {msg}")
-def warn(msg: str):   print(f"[WARN] {msg}")
-def error(msg: str):  print(f"[ERROR] {msg}")
-def debug(msg: str):
+def info(msg: str) -> None:
+    print(f"[INFO] {msg}")
+
+def warn(msg: str) -> None:
+    print(f"[WARN] {msg}")
+
+def error(msg: str) -> None:
+    print(f"[ERROR] {msg}")
+
+def debug(msg: str) -> None:
     if os.getenv("WIKIBENCH_DEBUG") == "1":
         print(f"[DEBUG] {msg}")
-
-# ---------------------------------------------------------------------------
-# Ollama model discovery (/api/tags + fallback)
-# ---------------------------------------------------------------------------
-
-def ensure_http_base(host: Optional[str]) -> str:
-    """
-    Normalize OLLAMA_HOST to an HTTP base like: http://127.0.0.1:11434
-    """
-    default = "http://127.0.0.1:11434"
-    if not host:
-        return default
-    h = host.strip()
-    if not h.startswith("http://") and not h.startswith("https://"):
-        h = f"http://{h}"
-    return h
-
-def fetch_ollama_tags_via_http(base_url: str, timeout: float = 3.0) -> Optional[Dict[str, Any]]:
-    """
-    Returns JSON dict from /api/tags or None on failure.
-    """
-    url = base_url.rstrip("/") + "/api/tags"
-    debug(f"Fetching Ollama tags via HTTP: {url}")
-    try:
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                warn(f"Ollama /api/tags returned HTTP {resp.status}")
-                return None
-            data = resp.read().decode("utf-8", errors="ignore")
-            return json.loads(data)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-        warn(f"HTTP fetch to {url} failed: {e}")
-        return None
-    except Exception as e:
-        warn(f"Unexpected error fetching tags via HTTP: {e}")
-        return None
-
-def fallback_list_models_via_cli() -> List[str]:
-    """
-    Fallback: parse 'ollama list' plain text. We take the first column per row.
-    """
-    try:
-        proc = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            env=os.environ.copy(),
-        )
-        out = (proc.stdout or "").strip()
-        if not out:
-            return []
-        lines = [ln for ln in out.splitlines() if ln.strip()]
-        # Skip potential header; extract first token per line
-        models = []
-        for ln in lines:
-            tok = ln.split()[0]
-            if tok and ":" in tok:  # heuristic
-                models.append(tok)
-        return models
-    except Exception as e:
-        warn(f"Fallback 'ollama list' failed: {e}")
-        return []
-
-def human_bytes(n: Optional[int]) -> str:
-    if n is None:
-        return "?"
-    step = 1024.0
-    units = ["B", "KB", "MB", "GB", "TB"]
-    s = float(n)
-    for u in units:
-        if s < step:
-            return f"{s:.1f} {u}"
-        s /= step
-    return f"{s:.1f} PB"
-
-def discover_installed_models() -> List[Dict[str, Any]]:
-    """
-    Returns a list of dicts with at least: name, size_bytes?, family?, param_size?, quant?
-    Tries /api/tags then falls back to `ollama list`.
-    """
-    base = ensure_http_base(os.getenv("OLLAMA_HOST"))
-    payload = fetch_ollama_tags_via_http(base)
-    if payload and isinstance(payload, dict) and "models" in payload:
-        models = []
-        for m in payload["models"]:
-            name = m.get("name") or ""
-            details = m.get("details") or {}
-            models.append({
-                "name": name,
-                "size_bytes": m.get("size"),
-                "family": details.get("family"),
-                "param_size": details.get("parameter_size"),
-                "quant": details.get("quantization_level"),
-                "modified_at": m.get("modified_at"),
-                "digest": m.get("digest"),
-            })
-        if models:
-            return models
-
-    # Fallback to CLI
-    names = fallback_list_models_via_cli()
-    return [{"name": n, "size_bytes": None, "family": None, "param_size": None, "quant": None} for n in names]
-
-def choose_model_interactively(models: List[Dict[str, Any]], page_size: int = 20) -> Optional[str]:
-    if not models:
-        error("No Ollama models found. Use `ollama pull <model>` to install one.")
-        return None
-
-    info(f"Discovered {len(models)} model(s). Use number to select, 'n' next page, 'p' previous, 'q' to quit.")
-    page = 0
-    total_pages = max(1, (len(models) + page_size - 1) // page_size)
-
-    while True:
-        start = page * page_size
-        end = min(len(models), start + page_size)
-        print()
-        print(f"[INFO] Models {start+1}-{end} of {len(models)} (page {page+1}/{total_pages})")
-        for idx, m in enumerate(models[start:end], start=start + 1):
-            size_s = human_bytes(m.get("size_bytes"))
-            fam = m.get("family") or "-"
-            quant = m.get("quant") or "-"
-            psize = m.get("param_size") or "-"
-            print(f"  [{idx:>3}] {m['name']:<32} | {size_s:>8} | family={fam} | params={psize} | quant={quant}")
-
-        choice = input("\nSelect model #: ").strip().lower()
-        if choice == "n":
-            if page + 1 < total_pages:
-                page += 1
-            else:
-                info("Already at last page.")
-            continue
-        if choice == "p":
-            if page > 0:
-                page -= 1
-            else:
-                info("Already at first page.")
-            continue
-        if choice == "q":
-            return None
-
-        if choice.isdigit():
-            i = int(choice)
-            if 1 <= i <= len(models):
-                info(f"Selected model: {models[i-1]['name']}")
-                return models[i - 1]["name"]
-            else:
-                warn("Invalid number.")
-        else:
-            warn("Enter a number, or 'n'/'p'/'q'.")
 
 # ---------------------------------------------------------------------------
 # Prompt template handling
@@ -258,8 +109,7 @@ def render_prompt(template: Dict[str, Any],
                   html_snippet: str,
                   visited: List[str]) -> str:
     """
-    We keep the template as YAML and do string replacement for placeholders embedded in scalars.
-    Placeholders:
+    Placeholders inside the YAML template:
       - {{TARGET_TITLE}}
       - {{VISITED_JSON}}
       - {{ARTICLE_HTML}}
@@ -268,11 +118,38 @@ def render_prompt(template: Dict[str, Any],
     yaml_text = yaml_text.replace("{{TARGET_TITLE}}", target_title)
     yaml_text = yaml_text.replace("{{VISITED_JSON}}", json.dumps(visited, ensure_ascii=False))
     yaml_text = yaml_text.replace("{{ARTICLE_HTML}}", html_snippet)
-    # Add a tiny header so it's clear to the model what follows
     return f"# WikiBench Prompt\n{yaml_text}"
 
 # ---------------------------------------------------------------------------
-# HTML link harvesting (from extract_text_with_links output)
+# HTML extraction (subprocess call to extractor CLI)
+# ---------------------------------------------------------------------------
+
+def get_article_html(title: str) -> str:
+    """
+    Runs ./extract_text_with_links.py <title> and captures stdout.
+    Falls back to 'python3 extract_text_with_links.py', then 'python'.
+    Returns raw string (already simplified with <link title="...">...).
+    """
+    title_arg = title.replace("_", " ")
+    candidates = [
+        [str(SCRIPT_DIR / "extract_text_with_links.py"), title_arg],
+        ["python3", str(SCRIPT_DIR / "extract_text_with_links.py"), title_arg],
+        ["python", str(SCRIPT_DIR / "extract_text_with_links.py"), title_arg],
+    ]
+    for cmd in candidates:
+        try:
+            debug(f"Trying extractor: {' '.join(cmd)}")
+            proc = subprocess.run(cmd, capture_output=True, check=True)
+            out = proc.stdout.decode("utf-8", errors="ignore")
+            # Extract only the mw-parser-output block if present (keeps noise down)
+            m = re.search(r'(<div class="mw-content-ltr mw-parser-output".*?</div>)', out, re.DOTALL)
+            return m.group(1) if m else out
+        except Exception as e:
+            debug(f"Extractor failed with {e}; trying next candidate...")
+    raise RuntimeError("Failed to run extract_text_with_links.py via subprocess.")
+
+# ---------------------------------------------------------------------------
+# Parse <link title="...">
 # ---------------------------------------------------------------------------
 
 _LINK_TITLE_RE = re.compile(r'<link\b[^>]*\btitle="([^"]+)"', re.IGNORECASE)
@@ -281,64 +158,136 @@ def normalize_title(t: str) -> str:
     return t.strip().replace(" ", "_")
 
 def title_key_for_compare(t: str) -> str:
-    # Compare in a normalized, case-insensitive underscore form
     return normalize_title(t).lower()
 
-def extract_link_titles(html_snippet: str) -> Tuple[List[str], set]:
+def extract_link_titles(html_snippet: str) -> Tuple[List[str], Dict[str, str], set]:
     """
     Returns:
-      - ordered list of raw titles found (as in the HTML)
-      - normalized set for fast membership checks
+      - ordered list of raw titles (as they appear)
+      - map: normalized_key -> canonical_title_with_underscores
+      - set of normalized keys for membership checks
     """
     titles = _LINK_TITLE_RE.findall(html_snippet or "")
-    normalized_set = {title_key_for_compare(t) for t in titles}
-    return titles, normalized_set
+    key_to_title: Dict[str, str] = {}
+    for t in titles:
+        key = title_key_for_compare(t)
+        # last one wins, but titles are usually consistent on the page
+        key_to_title[key] = normalize_title(t)
+    available_norm = set(key_to_title.keys())
+    return titles, key_to_title, available_norm
 
 # ---------------------------------------------------------------------------
-# Run extract_text_with_links.py as a subprocess to get HTML snippet
+# Ollama model discovery & invocation (optional picker)
 # ---------------------------------------------------------------------------
 
-def get_article_html(title: str) -> str:
+def discover_ollama_models_http(host: str) -> Optional[List[Dict[str, Any]]]:
+    url = host.rstrip("/") + "/api/tags"
+    debug(f"Fetching Ollama tags via HTTP: {url}")
+    try:
+        req = Request(url, headers={"Accept": "application/json"})
+        with urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            # Shape: {"models":[{"name":"llama3:8b", "details": {...}}, ...]}
+            return payload.get("models", [])
+    except URLError as e:
+        debug(f"HTTP discovery failed: {e}")
+        return None
+    except Exception as e:
+        debug(f"HTTP discovery error: {e}")
+        return None
+
+def discover_ollama_models_cli() -> List[Dict[str, Any]]:
     """
-    Calls ./extract_text_with_links.py <title> and returns its stdout.
-    Falls back to `python3 extract_text_with_links.py` if direct exec fails.
-    Optionally trims output to the main <div ... mw-parser-output ...> block.
+    Fallback to `ollama list`. Parse coarse fields.
     """
-    script = SCRIPT_DIR / "extract_text_with_links.py"
-    cmds = [
-        [str(script), title],
-        [sys.executable or "python3", str(script), title],
-        ["python3", str(script), title],
-    ]
-    last_err = None
-    for cmd in cmds:
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=os.environ.copy(),
-                check=True,
-            )
-            out = (proc.stdout or "").strip()
-            if not out:
-                continue
-            # Try to keep only the main content div to reduce noise in prompts
-            m = re.search(r'(<div[^>]*mw-parser-output[^>]*>.*?</div>)', out, flags=re.IGNORECASE | re.DOTALL)
-            return m.group(1) if m else out
-        except Exception as e:
-            last_err = e
+    try:
+        out = subprocess.check_output(["ollama", "list"]).decode("utf-8", errors="ignore").strip()
+    except Exception as e:
+        warn(f"Failed to run 'ollama list': {e}")
+        return []
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    # skip header row if present
+    if lines and lines[0].lower().startswith("name"):
+        lines = lines[1:]
+    models: List[Dict[str, Any]] = []
+    for ln in lines:
+        cols = [c.strip() for c in re.split(r"\s{2,}", ln)]
+        if not cols:
             continue
-    raise RuntimeError(f"Failed to run extract_text_with_links.py: {last_err}")
+        name = cols[0]
+        size = cols[1] if len(cols) > 1 else ""
+        models.append({"name": name, "details": {"parameter_size": "", "quantization_level": "", "size": size}})
+    return models
 
-# ---------------------------------------------------------------------------
-# Ollama invocation
-# ---------------------------------------------------------------------------
+def interactive_pick_model(models: List[Dict[str, Any]]) -> Optional[str]:
+    if not models:
+        warn("No models discovered.")
+        return None
+
+    pretty = []
+    for m in models:
+        name = m.get("name", "")
+        det = m.get("details", {}) or {}
+        size_bytes = det.get("size", 0)
+        size_str = ""
+        if isinstance(size_bytes, (int, float)) and size_bytes > 0:
+            gb = size_bytes / (1024**3)
+            mb = size_bytes / (1024**2)
+            size_str = f"{gb:.1f} GB" if gb >= 0.8 else f"{mb:.1f} MB"
+        elif isinstance(size_bytes, str):
+            size_str = size_bytes
+        family = det.get("family", "") or det.get("format", "")
+        params = det.get("parameter_size", "")
+        quant  = det.get("quantization_level", "")
+        pretty.append((name, size_str, family, params, quant))
+
+    page_size = 20
+    page = 0
+    total = len(pretty)
+
+    info(f"Discovered {total} model(s). Use number to select, 'n' next page, 'p' previous, 'q' to quit.")
+    while True:
+        start = page * page_size
+        end = min(start + page_size, total)
+        print()
+        info(f"Models {start+1}-{end} of {total} (page {page+1}/{(total-1)//page_size+1})")
+        for idx, (name, size_str, family, params, quant) in enumerate(pretty[start:end], start=start+1):
+            print(f"  [{idx:3d}] {name:<28} | {size_str:>8} | family={family or '-'} | params={params or '-'} | quant={quant or '-'}")
+
+        sel = input("\nSelect model #: ").strip().lower()
+        if sel == "q":
+            return None
+        if sel == "n":
+            if end < total:
+                page += 1
+            continue
+        if sel == "p":
+            if page > 0:
+                page -= 1
+            continue
+
+        if sel.isdigit():
+            i = int(sel)
+            if 1 <= i <= total:
+                chosen = pretty[i-1][0]
+                info(f"Selected model: {chosen}")
+                return chosen
+            else:
+                warn("Out of range.")
+        else:
+            warn("Invalid input.")
+
+def pick_model_via_discovery(default_host: str = "http://127.0.0.1:11434") -> Optional[str]:
+    host = os.getenv("OLLAMA_HOST", default_host)
+    models = discover_ollama_models_http(host)
+    if models is None:
+        debug("Falling back to `ollama list` for discovery.")
+        models = discover_ollama_models_cli()
+    return interactive_pick_model(models)
 
 def run_ollama_prompt(model: str, prompt: str) -> str:
     """
     Invoke Ollama CLI and return the model's raw text response.
-    We pass through the current environment so OLLAMA_HOST is honored.
     """
     env = os.environ.copy()
     proc = subprocess.run(
@@ -354,8 +303,11 @@ def run_ollama_prompt(model: str, prompt: str) -> str:
     return out.strip()
 
 # ---------------------------------------------------------------------------
-# Choice parsing and validation
+# Choice parsing & validation
 # ---------------------------------------------------------------------------
+
+_QUOTED_RE = re.compile(r'(?P<q>`{1,3}|["\'])\s*(?P<txt>[^`"\']+?)\s*(?P=q)')
+_TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9 _().,'\-]+")
 
 def first_nonempty_line(s: str) -> str:
     for line in (s or "").splitlines():
@@ -364,52 +316,130 @@ def first_nonempty_line(s: str) -> str:
             return line
     return ""
 
-def sanitize_model_choice(raw: str) -> str:
+def parse_choice(raw: str,
+                 available_map: Dict[str, str],
+                 target_norm: str) -> Tuple[str, str]:
     """
-    Accepts raw model output; returns a single candidate title or "STOP".
-    Strips bullets, backticks, quotes, arrows.
+    Try to resolve the model text to a valid choice.
+
+    Returns (choice_key_or_SPECIAL, reason) where:
+      - choice_key_or_SPECIAL is:
+          * normalized key of a title from available_map,
+          * "__STOP__" (STOP),
+          * "" on failure.
+      - reason is one of:
+          "ok", "stop", "could_not_parse", "target_not_in_available_links"
     """
     line = first_nonempty_line(raw)
     if not line:
-        return ""
+        return "", "could_not_parse"
 
-    # Strip common wrappers
-    line = line.strip("`")
-    if line.startswith(("```", "~~~")):
-        parts = line.split()
-        if len(parts) > 1:
-            line = parts[1]
-        else:
-            line = ""
+    # STOP?
+    if line.strip().upper() == "STOP":
+        return "__STOP__", "stop"
 
-    # Remove bullets/arrows
-    line = line.lstrip("-*•>→").strip()
+    # Strip common chatter prefixes
+    prefixes = [
+        "the selected link is",
+        "selected link is",
+        "selected:",
+        "selection:",
+        "next:",
+        "next link:",
+        "choose:",
+        "choice:",
+        "pick:",
+    ]
+    low = line.lower()
+    for p in prefixes:
+        if low.startswith(p):
+            if ":" in line:
+                line = line.split(":", 1)[1].strip()
+            else:
+                line = line[len(p):].strip()
+            break
 
-    if line.upper() == "STOP":
-        return "STOP"
+    candidates: List[str] = []
 
-    # Remove surrounding quotes
-    if (line.startswith('"') and line.endswith('"')) or (line.startswith("'") and line.endswith("'")):
-        line = line[1:-1].strip()
+    # 1) Quoted/backticked substrings
+    for m in _QUOTED_RE.finditer(line):
+        candidates.append(m.group("txt").strip())
 
-    return normalize_title(line)
+    # 2) After colon (already handled but keep as fallback)
+    if ":" in line:
+        candidates.append(line.split(":", 1)[1].strip())
 
-def validate_choice(choice: str,
-                    available_norm: set,
-                    visited_norm: set,
-                    target_norm: str) -> Tuple[bool, str]:
-    """
-    Returns (is_valid, reason_if_invalid).
-    """
-    if not choice:
-        return False, "empty_output"
-    if choice == "STOP":
-        return False, "stop"
-    if choice in visited_norm:
+    # 3) Whole line
+    candidates.append(line.strip())
+
+    # 4) Tokenization
+    for m in _TITLE_TOKEN_RE.finditer(line):
+        tok = m.group(0).strip()
+        if tok:
+            candidates.append(tok)
+
+    # Normalized candidate keys
+    cand_keys = [title_key_for_compare(c) for c in candidates if c]
+    avail_keys = set(available_map.keys())
+
+    # Track whether the model is clearly trying to say the target
+    target_mentioned = False
+    target_space = target_norm.replace("_", " ").lower()
+    for c in candidates:
+        cl = c.lower()
+        if title_key_for_compare(c) == target_norm or target_space in cl:
+            target_mentioned = True
+
+    # Any exact available match?
+    for ck in cand_keys:
+        if ck in avail_keys:
+            return ck, "ok"
+
+    # Substring match: allow fuzzy match only to *available* titles
+    for ck, canon in available_map.items():
+        canon_space = canon.replace("_", " ").lower()
+        for c in candidates:
+            if canon_space in c.lower():
+                return ck, "ok"
+
+    # Target was mentioned but it is not an actual link on this page → hallucination
+    if target_mentioned:
+        return "", "target_not_in_available_links"
+
+    return "", "could_not_parse"
+
+def validate_not_visited(choice_key: str, visited_norm: set) -> Tuple[bool, str]:
+    if choice_key in visited_norm:
         return False, "repeated"
-    if choice not in available_norm and choice != target_norm:
-        return False, "not_in_available_links"
-    return True, ""
+    return True, "ok"
+
+# ---------------------------------------------------------------------------
+# Retry feedback
+# ---------------------------------------------------------------------------
+
+def build_strict_feedback(available_map: Dict[str, str],
+                          target_norm: str,
+                          max_chars: int = 12000) -> str:
+    """
+    Construct a strict re-ask that enumerates allowed titles and format rules.
+
+    IMPORTANT: We only list titles that actually exist as <link title="...">
+    on this page. The target will only be present here if it is truly linked.
+    """
+    allowed = list(dict.fromkeys(available_map.values()))  # preserve order, de-dup
+
+    block = "\n".join(allowed)
+    if len(block) > max_chars:
+        block = block[:max_chars] + "\n..."
+
+    return (
+        "\n# STRICT OUTPUT FORMAT (RETRY)\n"
+        "These are the ONLY valid titles you may output for this step.\n"
+        "Return EXACTLY ONE of the following titles, verbatim, on a SINGLE line.\n"
+        "No quotes, no extra words, no punctuation. If no valid move exists, output STOP.\n"
+        "Allowed titles:\n"
+        f"{block}\n"
+    )
 
 # ---------------------------------------------------------------------------
 # Navigation loop
@@ -425,7 +455,6 @@ def run_navigation(model: str,
     Executes step-by-step navigation until success/stop/failure/max_steps.
     Returns (trace_dict, summary_dict).
     """
-
     current = normalize_title(start_title)
     target = normalize_title(target_title)
     visited: List[str] = [current]
@@ -437,50 +466,61 @@ def run_navigation(model: str,
     status = "failed"
     reached_target = False
 
+    target_norm = title_key_for_compare(target)
+
     for step in range(1, max_steps + 1):
         html_snippet = get_article_html(current)
-        titles_raw, available_norm = extract_link_titles(html_snippet)
+        titles_raw, available_map, available_norm = extract_link_titles(html_snippet)
 
+        # Prepare base prompt
         prompt = render_prompt(prompt_template, current, target, html_snippet, visited)
 
         attempt = 0
-        choice_final = ""
+        choice_key_final = ""
         raw_history: List[str] = []
-        reason_if_invalid = ""
+        invalid_reason = ""
         valid = False
 
         while attempt <= max_retries:
             attempt += 1
-
+            debug(f"\n=== Prompt for step {step}, attempt {attempt} ===\n{prompt}")
             raw = run_ollama_prompt(model, prompt)
+            debug(f"\n=== Raw model output ===\n{raw}")
+
             raw_history.append(raw)
-            choice = sanitize_model_choice(raw)
-            choice_key = title_key_for_compare(choice)
 
-            is_valid, reason = validate_choice(
-                choice_key, available_norm, visited_norm, title_key_for_compare(target)
-            )
+            choice_key, reason = parse_choice(raw, available_map, target_norm)
 
-            if is_valid:
-                choice_final = choice
-                valid = True
-                break
-
-            if reason == "stop":
+            if choice_key == "__STOP__":
                 status = "stopped"
-                reason_if_invalid = reason
+                invalid_reason = "stop"
                 break
 
-            reason_if_invalid = reason
-            warn(f"Invalid selection (attempt {attempt}/{max_retries}): {choice or '<empty>'} — {reason}")
+            if not choice_key:
+                # could_not_parse, target_not_in_available_links, etc.
+                invalid_reason = reason
+            else:
+                # Must be a genuine link on this page
+                if choice_key not in available_norm:
+                    invalid_reason = "not_in_available_links"
+                else:
+                    ok, r = validate_not_visited(choice_key, visited_norm)
+                    if not ok:
+                        invalid_reason = r  # "repeated"
+                    else:
+                        choice_key_final = choice_key
+                        valid = True
+                        break
+
+            # Retry with strict feedback
+            warn(f"Invalid selection (attempt {attempt}/{max_retries}): {raw.splitlines()[0:1] or ['<empty>']} — {invalid_reason}")
             if attempt <= max_retries:
-                feedback = (
-                    "\n# FEEDBACK:\n"
-                    f"The previous selection \"{choice or '<empty>'}\" was invalid ({reason}). "
-                    "Choose exactly ONE title that appears in <link title=\"...\"> elements, "
-                    "or output STOP if none remain. Output a SINGLE line ONLY.\n"
-                )
-                prompt = prompt + feedback
+                prompt = prompt + build_strict_feedback(available_map, target_norm)
+
+        # Record step trace
+        chosen_title = None
+        if valid:
+            chosen_title = available_map[choice_key_final]
 
         trace.append({
             "step": step,
@@ -488,14 +528,14 @@ def run_navigation(model: str,
             "target": target,
             "available_links_count": len(titles_raw),
             "model_raw_attempts": raw_history,
-            "chosen": choice_final if valid else None,
+            "chosen": chosen_title,
             "valid": valid,
-            "invalid_reason": (None if valid else reason_if_invalid),
+            "invalid_reason": (None if valid else invalid_reason),
             "retries_used": (attempt - 1),
         })
 
         if not valid:
-            if reason_if_invalid == "stop":
+            if invalid_reason == "stop":
                 info("Model requested STOP.")
                 status = "stopped"
             else:
@@ -503,8 +543,9 @@ def run_navigation(model: str,
                 status = "failed"
             break
 
-        next_title = choice_final
-        if title_key_for_compare(next_title) == title_key_for_compare(target):
+        # Advance
+        next_title = chosen_title  # canonical title with underscores
+        if title_key_for_compare(next_title) == target_norm:
             visited.append(next_title)
             reached_target = True
             status = "success"
@@ -541,9 +582,6 @@ def run_navigation(model: str,
 # ---------------------------------------------------------------------------
 
 def compute_optimal_path(start_title: str, target_title: str, max_depth: int = 6) -> Dict[str, Any]:
-    """
-    Calls bidirectional_bfs to find the optimal path (if any).
-    """
     start = normalize_title(start_title)
     target = normalize_title(target_title)
     info(f"Computing optimal path for: {start} → {target}")
@@ -573,7 +611,7 @@ def save_results(model: str,
     ts = time.strftime("%Y%m%d-%H%M%S")
     base = f"{ts}_{model.replace(':','_')}_{normalize_title(start)}_to_{normalize_title(target)}"
 
-    payload = {
+    payload: Dict[str, Any] = {
         "meta": {
             "prompt_template_path": str(prompt_path),
             "ollama_host": os.getenv("OLLAMA_HOST", "default"),
@@ -600,11 +638,10 @@ def save_results(model: str,
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Run WikiBench benchmark with Ollama")
-    parser.add_argument("--model", help="Ollama model name (e.g., llama3:8b). Omit to pick interactively.")
-    parser.add_argument("--pick-model", action="store_true",
-                        help="Interactively choose an installed Ollama model via /api/tags or `ollama list`.")
+    parser.add_argument("--model", help="Ollama model name (e.g., llama3.1:latest)")
+    parser.add_argument("--pick-model", action="store_true", help="Interactively pick an installed Ollama model")
     parser.add_argument("--start", required=True, help="Starting article title")
     parser.add_argument("--target", required=True, help="Target article title")
     parser.add_argument("--max-steps", type=int, default=10, help="Maximum navigation steps")
@@ -614,15 +651,17 @@ def main():
     parser.add_argument("--out-format", choices=["json", "yaml"], default="json", help="Results file format")
     args = parser.parse_args()
 
-    # Resolve model selection
+    # Model selection
     model = args.model
-    if args.pick_model or not model:
-        models = discover_installed_models()
-        chosen = choose_model_interactively(models)
+    if not model and args.pick_model:
+        chosen = pick_model_via_discovery()
         if not chosen:
-            error("No model selected. Exiting.")
+            error("No model selected.")
             return
         model = chosen
+    if not model:
+        model = "llama3.1:latest"
+        warn(f"--model not provided; using default: {model}")
 
     prompt_path = resolve_prompt_path(args.prompt)
     prompt_template = load_prompt_template(prompt_path)
