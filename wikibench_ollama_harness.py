@@ -50,22 +50,48 @@ from extract_text_with_links import main as _extract_links_marker  # noqa: F401
 load_dotenv()
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """
+    Interpret common truthy/falsey env values.
+
+    Truthy examples: "1", "true", "yes", "on"
+    Falsey examples: "0", "false", "no", "off", "" (or unset -> default)
+    """
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() not in ("0", "false", "no", "off", "")
+    
+
+# Should we colorize log output?
+# Controlled via WIKIBENCH_COLOR in .env (default: True)
+USE_COLOR = _env_flag("WIKIBENCH_COLOR", default=True)
+
+def _color(code: str, text: str) -> str:
+    if not USE_COLOR:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
 def info(msg: str) -> None:
-    print(f"[INFO] {msg}")
+    # cyan
+    print(_color("36", f"[INFO] {msg}"))
 
 def warn(msg: str) -> None:
-    print(f"[WARN] {msg}")
+    # yellow
+    print(_color("33", f"[WARN] {msg}"))
 
 def error(msg: str) -> None:
-    print(f"[ERROR] {msg}")
+    # red + bold
+    print(_color("1;31", f"[ERROR] {msg}"))
 
 def debug(msg: str) -> None:
     if os.getenv("WIKIBENCH_DEBUG") == "1":
-        print(f"[DEBUG] {msg}")
+        # magenta
+        print(_color("35", f"[DEBUG] {msg}"))
 
 # ---------------------------------------------------------------------------
 # Prompt template handling
@@ -78,19 +104,28 @@ def resolve_prompt_path(cli_path: Optional[str]) -> Path:
       2) $WIKIBENCH_PROMPT_PATH
       3) <repo>/prompts/prompt.yml (default)
     """
+    # 1) Explicit CLI flag always wins; treat it as given (cwd-relative or absolute)
     if cli_path:
         p = Path(cli_path).expanduser().resolve()
         if not p.exists():
             raise FileNotFoundError(f"Prompt file not found: {p}")
         return p
 
+    # 2) Environment variable, relative to SCRIPT_DIR if not absolute
     env_path = os.getenv("WIKIBENCH_PROMPT_PATH")
     if env_path:
-        p = Path(env_path).expanduser().resolve()
+        p = Path(env_path)
+        if not p.is_absolute():
+            # resolve relative to the harness location (repo root-ish)
+            p = (SCRIPT_DIR / p).expanduser().resolve()
+        else:
+            p = p.expanduser().resolve()
+
         if not p.exists():
             raise FileNotFoundError(f"WIKIBENCH_PROMPT_PATH points to missing file: {p}")
         return p
 
+    # 3) Default prompt in prompts/prompt.yml next to the harness
     default = SCRIPT_DIR / "prompts" / "prompt.yml"
     if not default.exists():
         raise FileNotFoundError(
@@ -98,6 +133,7 @@ def resolve_prompt_path(cli_path: Optional[str]) -> Path:
             f"Pass --prompt or set $WIKIBENCH_PROMPT_PATH."
         )
     return default
+
 
 def load_prompt_template(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -432,9 +468,15 @@ def build_strict_feedback(available_map: Dict[str, str],
     if len(block) > max_chars:
         block = block[:max_chars] + "\n..."
 
+    target_natural = target_norm.replace("_", " ")
+
     return (
         "\n# STRICT OUTPUT FORMAT (RETRY)\n"
-        "These are the ONLY valid titles you may output for this step.\n"
+        f"Your long-term goal is to reach the Wikipedia article titled \"{target_natural}\".\n"
+        "From the list below, choose EXACTLY ONE title that you believe moves you closer to that target.\n"
+        "Do NOT choose randomly. Prefer links that are semantically related to the target topic or\n"
+        "that are likely to lead toward it through a small number of hops.\n"
+        "You may only output one of the titles listed below, or STOP if no valid move exists.\n"
         "Return EXACTLY ONE of the following titles, verbatim, on a SINGLE line.\n"
         "No quotes, no extra words, no punctuation. If no valid move exists, output STOP.\n"
         "Allowed titles:\n"
@@ -483,7 +525,7 @@ def run_navigation(model: str,
 
         while attempt <= max_retries:
             attempt += 1
-            debug(f"\n=== Prompt for step {step}, attempt {attempt} ===\n{prompt}")
+            # debug(f"\n=== Prompt for step {step}, attempt {attempt} ===\n{prompt}")
             raw = run_ollama_prompt(model, prompt)
             debug(f"\n=== Raw model output ===\n{raw}")
 
@@ -644,7 +686,7 @@ def main() -> None:
     parser.add_argument("--pick-model", action="store_true", help="Interactively pick an installed Ollama model")
     parser.add_argument("--start", required=True, help="Starting article title")
     parser.add_argument("--target", required=True, help="Target article title")
-    parser.add_argument("--max-steps", type=int, default=10, help="Maximum navigation steps")
+    parser.add_argument("--max-steps", type=int, default=20, help="Maximum navigation steps")
     parser.add_argument("--max-retries", type=int, default=2, help="Retries per step for invalid output")
     parser.add_argument("--compare", action="store_true", help="Compute optimal path for comparison (slow)")
     parser.add_argument("--prompt", help="Path to YAML prompt template (overrides env/default)")
@@ -675,6 +717,22 @@ def main() -> None:
         prompt_template=prompt_template,
     )
 
+# Print a concise machine-readable summary for this run
+# {
+#   "summary": {
+#     "model": "...",
+#     "start": "...",
+#     "target": "...",
+#     "max_steps": ...,
+#     "max_retries": ...,
+#     "status": "...",
+#     "visited": [...],
+#     "hops": ...,
+#     "reached_target": ...
+#   }
+# }
+    print(json.dumps({"summary": summary}, ensure_ascii=False, indent=2))
+    
     comparison = compute_optimal_path(args.start, args.target) if args.compare else None
 
     save_results(
