@@ -50,7 +50,7 @@
 
 ## Optional Polish
 
-- [ ] Replace hardcoded debug `"Adolf_Hitler"` with actual target variable
+- [x] Replace hardcoded debug `"Adolf_Hitler"` with actual target variable
 - [x] Add colored logging for debug/info/success paths
 - [ ] Add CLI help messages for all scripts
 - [x] Create `requirements.txt` or `pyproject.toml`
