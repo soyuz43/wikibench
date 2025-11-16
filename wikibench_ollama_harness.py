@@ -734,17 +734,51 @@ def save_results(model: str,
 # CLI
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run WikiBench benchmark with Ollama")
     parser.add_argument("--model", help="Ollama model name (e.g., llama3.1:latest)")
-    parser.add_argument("--pick-model", action="store_true", help="Interactively pick an installed Ollama model")
+    parser.add_argument(
+        "--pick-model",
+        action="store_true",
+        help="Interactively pick an installed Ollama model",
+    )
     parser.add_argument("--start", required=True, help="Starting article title")
-    parser.add_argument("--target", required=True, help="Target article title")
-    parser.add_argument("--max-steps", type=int, default=20, help="Maximum navigation steps")
-    parser.add_argument("--max-retries", type=int, default=2, help="Retries per step for invalid output")
-    parser.add_argument("--compare", action="store_true", help="Compute optimal path for comparison (slow)")
-    parser.add_argument("--prompt", help="Path to YAML prompt template (overrides env/default)")
-    parser.add_argument("--out-format", choices=["json", "yaml"], default="json", help="Results file format")
+    parser.add_argument(
+        "--target",
+        required=False,
+        help="Target article title (falls back to $WIKIBENCH_TARGET if omitted)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=20,
+        help="Maximum navigation steps",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Retries per step for invalid output",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Compute optimal path for comparison (slow)",
+    )
+    parser.add_argument(
+        "--prompt",
+        help="Path to YAML prompt template (overrides env/default)",
+    )
+    parser.add_argument(
+        "--out-format",
+        choices=["json", "yaml"],
+        default="json",
+        help="Results file format",
+    )
     args = parser.parse_args()
 
     # Model selection
@@ -759,46 +793,55 @@ def main() -> None:
         model = "llama3.1:latest"
         warn(f"--model not provided; using default: {model}")
 
+    # Target resolution: CLI flag wins, otherwise fall back to env
+    target = args.target or os.getenv("WIKIBENCH_TARGET")
+    if not target:
+        error(
+            "No target article specified. Use --target or set $WIKIBENCH_TARGET in your .env."
+        )
+        return
+
     prompt_path = resolve_prompt_path(args.prompt)
     prompt_template = load_prompt_template(prompt_path)
 
     trace, summary = run_navigation(
         model=model,
         start_title=args.start,
-        target_title=args.target,
+        target_title=target,
         max_steps=args.max_steps,
         max_retries=args.max_retries,
         prompt_template=prompt_template,
     )
 
-# Print a concise machine-readable summary for this run
-# {
-#   "summary": {
-#     "model": "...",
-#     "start": "...",
-#     "target": "...",
-#     "max_steps": ...,
-#     "max_retries": ...,
-#     "status": "...",
-#     "visited": [...],
-#     "hops": ...,
-#     "reached_target": ...
-#   }
-# }
+    # Print a concise machine-readable summary for this run
+    # {
+    #   "summary": {
+    #     "model": "...",
+    #     "start": "...",
+    #     "target": "...",
+    #     "max_steps": ...,
+    #     "max_retries": ...,
+    #     "status": "...",
+    #     "visited": [...],
+    #     "hops": ...,
+    #     "reached_target": ...
+    #   }
+    # }
     print(json.dumps({"summary": summary}, ensure_ascii=False, indent=2))
-    
-    comparison = compute_optimal_path(args.start, args.target) if args.compare else None
+
+    comparison = compute_optimal_path(args.start, target) if args.compare else None
 
     save_results(
         model=model,
         start=args.start,
-        target=args.target,
+        target=target,
         prompt_path=prompt_path,
         trace=trace,
         summary=summary,
         comparison=comparison,
         out_format=args.out_format,
     )
+
 
 if __name__ == "__main__":
     try:
