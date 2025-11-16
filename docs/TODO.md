@@ -3,11 +3,11 @@
 ## Core Development Tasks
 
 ### LLM Benchmark Harness
-- [ ] Create `wikibench_ollama_harness.py`
-  - [ ] Accept model name, start + target concepts, and optional `max_depth`
-  - [ ] Call into async BFS logic
-  - [ ] Let the LLM choose which link to follow next
-  - [ ] Log full reasoning path
+- [x] Create `wikibench_ollama_harness.py`
+  - [x] Accept model name, start + target concepts, and optional `max_depth`
+  - [x] Call into async BFS logic
+  - [x] Let the LLM choose which link to follow next
+  - [x] Log full reasoning path
 
 - [ ] Support multiple LLM backends
   - [ ] Local (Ollama)
@@ -28,7 +28,7 @@
 - [ ] Run models against this and compare model hops vs optimal
 
 ### Result Handling
-- [ ] Output JSON per run: path, hops, time, model metadata
+- [x] Output JSON per run: path, hops, time, model metadata
 - [ ] Write summary: success/failure, percent optimal, etc.
 
 ### Reproducibility
@@ -51,7 +51,7 @@
 ## Optional Polish
 
 - [ ] Replace hardcoded debug `"Adolf_Hitler"` with actual target variable
-- [ ] Add colored logging for debug/info/success paths
+- [x] Add colored logging for debug/info/success paths
 - [ ] Add CLI help messages for all scripts
 - [x] Create `requirements.txt` or `pyproject.toml`
 - [ ] Add usage examples to README
