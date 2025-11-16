@@ -366,83 +366,137 @@ def parse_choice(raw: str,
       - reason is one of:
           "ok", "stop", "could_not_parse", "target_not_in_available_links"
     """
-    line = first_nonempty_line(raw)
-    if not line:
+    text = raw or ""
+    if not text.strip():
         return "", "could_not_parse"
 
-    # STOP?
-    if line.strip().upper() == "STOP":
-        return "__STOP__", "stop"
+    # Normalize lines once
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # Strip common chatter prefixes
-    prefixes = [
-        "the selected link is",
-        "selected link is",
-        "selected:",
-        "selection:",
-        "next:",
-        "next link:",
-        "choose:",
-        "choice:",
-        "pick:",
-    ]
-    low = line.lower()
-    for p in prefixes:
-        if low.startswith(p):
-            if ":" in line:
-                line = line.split(":", 1)[1].strip()
-            else:
-                line = line[len(p):].strip()
-            break
+    # --- STOP detection (even though prompt doesn't mention STOP anymore) ---
+    for ln in lines:
+        if ln.upper() == "STOP":
+            return "__STOP__", "stop"
+
+    # --- Build candidate strings ---
 
     candidates: List[str] = []
 
-    # 1) Quoted/backticked substrings
-    for m in _QUOTED_RE.finditer(line):
+    # 1) Prefer the *last* non-meta line ("Thinking..." style preambles are ignored)
+    def is_meta_line(ln: str) -> bool:
+        low = ln.lower()
+        if low.startswith("thinking"):
+            return True
+        if low in ("...done thinking.", "done.", "done"):
+            return True
+        return False
+
+    core_line = ""
+    for ln in reversed(lines):
+        if not is_meta_line(ln):
+            core_line = ln
+            break
+
+    if core_line:
+        # Strip common chatter prefixes on that core line
+        prefixes = [
+            "the selected link is",
+            "selected link is",
+            "selected:",
+            "selection:",
+            "next:",
+            "next link:",
+            "choose:",
+            "choice:",
+            "pick:",
+            "the output will be",
+            "the final output will be",
+        ]
+        low = core_line.lower()
+        for p in prefixes:
+            if low.startswith(p):
+                if ":" in core_line:
+                    core_line = core_line.split(":", 1)[1].strip()
+                else:
+                    core_line = core_line[len(p):].strip()
+                break
+
+        # From core line: quoted substrings, post-colon text, whole line, tokens
+        for m in _QUOTED_RE.finditer(core_line):
+            candidates.append(m.group("txt").strip())
+        if ":" in core_line:
+            candidates.append(core_line.split(":", 1)[1].strip())
+        candidates.append(core_line.strip())
+        for m in _TITLE_TOKEN_RE.finditer(core_line):
+            tok = m.group(0).strip()
+            if tok:
+                candidates.append(tok)
+
+    # 2) From the entire text: quoted substrings anywhere
+    for m in _QUOTED_RE.finditer(text):
         candidates.append(m.group("txt").strip())
 
-    # 2) After colon (already handled but keep as fallback)
-    if ":" in line:
-        candidates.append(line.split(":", 1)[1].strip())
+    # 3) From each line: text after colon (e.g., "The answer is: Ada_Lovelace")
+    for ln in lines:
+        if ":" in ln:
+            candidates.append(ln.split(":", 1)[1].strip())
 
-    # 3) Whole line
-    candidates.append(line.strip())
+    # 4) All non-meta lines themselves
+    for ln in lines:
+        if not is_meta_line(ln):
+            candidates.append(ln)
 
-    # 4) Tokenization
-    for m in _TITLE_TOKEN_RE.finditer(line):
+    # 5) Tokenization over the whole text (catches Ada_Lovelace, National_Transportation_Safety_Board, etc.)
+    for m in _TITLE_TOKEN_RE.finditer(text):
         tok = m.group(0).strip()
         if tok:
             candidates.append(tok)
 
-    # Normalized candidate keys
-    cand_keys = [title_key_for_compare(c) for c in candidates if c]
-    avail_keys = set(available_map.keys())
+    # Clean up obvious junk candidates
+    cleaned: List[str] = []
+    for c in candidates:
+        if not c:
+            continue
+        low = c.lower()
+        if low.startswith("thinking"):
+            continue
+        if low in ("...done thinking.", "done.", "done"):
+            continue
+        cleaned.append(c)
 
-    # Track whether the model is clearly trying to say the target
-    target_mentioned = False
+    candidates = cleaned
+    if not candidates:
+        return "", "could_not_parse"
+
+    # --- Target-mention detection for "target_not_in_available_links" ---
+    avail_keys = set(available_map.keys())
+    cand_keys = [title_key_for_compare(c) for c in candidates if c]
+
     target_space = target_norm.replace("_", " ").lower()
+    target_mentioned = False
     for c in candidates:
         cl = c.lower()
         if title_key_for_compare(c) == target_norm or target_space in cl:
             target_mentioned = True
 
-    # Any exact available match?
+    # 1) Exact normalized match with available titles?
     for ck in cand_keys:
         if ck in avail_keys:
             return ck, "ok"
 
-    # Substring match: allow fuzzy match only to *available* titles
+    # 2) Substring / fuzzy-ish match against canonical titles
     for ck, canon in available_map.items():
         canon_space = canon.replace("_", " ").lower()
         for c in candidates:
             if canon_space in c.lower():
                 return ck, "ok"
 
-    # Target was mentioned but it is not an actual link on this page → hallucination
+    # 3) Target was clearly mentioned but isn't actually a link here → hallucination
     if target_mentioned:
         return "", "target_not_in_available_links"
 
     return "", "could_not_parse"
+
 
 def validate_not_visited(choice_key: str, visited_norm: set) -> Tuple[bool, str]:
     if choice_key in visited_norm:
