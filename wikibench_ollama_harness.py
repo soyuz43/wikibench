@@ -707,9 +707,17 @@ def save_results(model: str,
     ts = time.strftime("%Y%m%d-%H%M%S")
     base = f"{ts}_{model.replace(':','_')}_{normalize_title(start)}_to_{normalize_title(target)}"
 
+    # Prefer a path relative to the repo root (SCRIPT_DIR) if possible
+    try:
+        rel_prompt_path = prompt_path.relative_to(SCRIPT_DIR)
+        prompt_path_str = str(rel_prompt_path)
+    except ValueError:
+        # prompt is outside the repo; keep absolute path
+        prompt_path_str = str(prompt_path)
+
     payload: Dict[str, Any] = {
         "meta": {
-            "prompt_template_path": str(prompt_path),
+            "prompt_template_path": prompt_path_str,
             "ollama_host": os.getenv("OLLAMA_HOST", "default"),
         },
         "summary": summary,
@@ -730,9 +738,6 @@ def save_results(model: str,
     info(f"Result saved to {out_path}")
     return out_path
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # CLI
