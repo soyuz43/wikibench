@@ -10,12 +10,12 @@
   - [x] Log full reasoning path
 
 - [ ] Support multiple LLM backends
-  - [ ] Local (Ollama)
+  - [x] Local (Ollama)
   - [ ] API (OpenAI, Groq, etc. — via env vars if present)
   - [ ] Let user choose which provider at runtime (if multiple detected)
 
 - [ ] Use env vars for configuration
-  - [ ] Target concept (e.g., `WIKIBENCH_TARGET`)
+  - [x] Target concept (e.g., `WIKIBENCH_TARGET`)
   - [ ] Max depth (default: 6)
   - [ ] API keys (`OPENAI_API_KEY`, `GROQ_API_KEY`, etc.)
 
